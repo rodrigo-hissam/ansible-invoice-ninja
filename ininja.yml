@@ -1,0 +1,175 @@
+---
+
+- name: Deploy Invoice Ninja
+  hosts: ininja
+  vars:
+    user: '{{ ansible_ssh_user }}'
+    app_name: ininja
+    webdir: /var/www/html
+    hostname: '{{ ansible_hostname }}'
+    nginx_deb_repo_enabled: true
+    nginx_deb_repo_key_url: 'https://nginx.org/keys/nginx_signing.key'
+    nginx_deb_repo_url: 'deb http://nginx.org/packages/{{ansible_distribution | lower}}/ {{ansible_distribution_release}} nginx'
+    mariadb_deb_repo_enabled: true
+    mariadb_deb_repo_url: 'deb [arch=amd64] http://mirrors.accretive-networks.net/mariadb/repo/10.1/{{ansible_distribution | lower }} {{ansible_distribution_release}} main'
+    mariadb_root_pwd: 'romo13.23'
+  tasks:
+    # Nginx
+    - name: Importing nginx key
+      apt_key:
+        #keyserver: keyserver.ubuntu.com
+        url: '{{nginx_deb_repo_key_url}}'
+        state: present
+      become: true
+      register: nginx_repo_key_added
+      when: nginx_deb_repo_enabled
+
+    - name: Adding nginx repo
+      apt_repository: 
+        repo: '{{nginx_deb_repo_url}}'
+        state: present
+        filename: 'nginx'
+      become: true
+      when: nginx_deb_repo_enabled
+        
+    - name: Ensure nginx is installed
+      apt:
+        name: nginx
+        state: installed
+      become: true
+      
+
+    - name: Starting nginx.service and enabling it at boot
+      service: 
+        name: nginx
+        state: started
+        enabled: yes
+      become: true
+      
+    
+    #- name: Copying nginx conf file
+
+    # MariaDB
+    - name: Importing mariadb key
+      apt_key:
+        keyserver: 'hkp://keyserver.ubuntu.com:80'
+        id: '0xF1656F24C74CD1D8'
+      become: true
+      register: mariadb_repo_key_added
+      when: mariadb_deb_repo_enabled
+
+    - name: Adding mariadb repo
+      apt_repository: 
+        repo: '{{mariadb_deb_repo_url}}'
+        state: present
+        filename: 'mariadb-10.1'
+      become: true
+      when: mariadb_deb_repo_enabled
+
+    - name: Ensure mariadb packages are installed
+      apt:
+        name: '{{ item }}'
+        state: installed
+        update_cache: yes
+      become: true
+      with_items:
+        - mariadb-common
+        - mariadb-server
+        - python-mysqldb
+
+    - name: Starting mariadb.service and enabling it at boot
+      service: 
+        name: mariadb
+        state: started
+        enabled: true
+      become: true
+
+    # MySQL server install with default login_user of 'root' and no password. To secure this
+    # user as part of an idempotent playbook, you must create at leaset two tasks: the first
+    # must change the root user's password, without providing any login_user/login_password
+    # details. The second must drop a ~/.my.cnf file containing the new root credentials.
+    # Subsequent runs of the playbook will then succeed by reading the new credentials from
+    # this file.
+
+    # 1st task - updating mariadb root user.
+    - name: Updating root password for all accounts
+      mysql_user:
+        name: root
+        host: '{{ item }}'
+        password: '{{ mariadb_root_pwd }}'
+      with_items:
+        - 127.0.0.1
+        - ::1
+        - localhost
+      become: true
+
+    # 2nd task - copying .my.cnf template to /root/
+    - name: Copying .my.cnf with root passwords
+      template:
+        src: my.cnf.j2
+        dest: /root/.my.cnf 
+        owner: root
+        group:
+        mode: 0644
+      become: true
+
+    # Securing steps for Mariadb 
+    - name: Deleting Mariadb anonymous users for all accounts
+      mysql_user:
+        name: ''
+        host_all: yes
+        state: absent
+      become: true
+
+    - name: Disallow remote root login
+      command: 'mysql -NBe "{{ item }}"'
+      with_items:
+        - DELETE FROM mysql.user WHERE User= 'root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')
+      changed_when: false
+      become: true
+
+    - name: Remove the Mariadb test database
+      mysql_db:
+        name: 'test'
+        state: absent
+      become: true
+    
+    # PHP dependencies
+    - name: Installing PHP 7.0 and its required extensions
+      apt:
+        name: '{{ item }}'
+        state: installed
+        update_cache: yes
+      with_items:
+        - curl
+        - wget
+        - php7.0
+        - php7.0-fpm
+        - php7.0-mysql
+        - php7.0-mcrypt
+        - php7.0-gd
+        - php7.0-curl
+        - php7.0-mbstring
+        - php7.0-zip
+        - php7.0-gmp
+        - php7.0-xml
+      become: true
+
+
+# Handlers
+  handlers:
+    - name: restart nginx
+      service: 
+        name: nginx
+        state: restarted
+
+    - name: reload nginx
+      service: 
+        name: nginx
+        state: reloaded
+    
+    - name: restart mariadb
+      service:
+        name: mariadb
+        state: restarted
+        sleep: 5
