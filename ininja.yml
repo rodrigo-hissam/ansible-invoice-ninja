@@ -13,11 +13,14 @@
     mariadb_deb_repo_enabled: true
     mariadb_deb_repo_url: 'deb [arch=amd64] http://mirrors.accretive-networks.net/mariadb/repo/10.1/{{ansible_distribution | lower }} {{ansible_distribution_release}} main'
     mariadb_root_pwd: 'romo13.23'
+    php_executable: 'php'
+    composer_path: '/usr/local/bin/composer'
+  
+
   tasks:
     # Nginx
     - name: Importing nginx key
       apt_key:
-        #keyserver: keyserver.ubuntu.com
         url: '{{nginx_deb_repo_key_url}}'
         state: present
       become: true
@@ -66,7 +69,7 @@
       become: true
       when: mariadb_deb_repo_enabled
 
-    - name: Ensure mariadb packages are installed
+    - name: Ensuring mariadb packages are installed
       apt:
         name: '{{ item }}'
         state: installed
@@ -128,7 +131,7 @@
       changed_when: false
       become: true
 
-    - name: Remove the Mariadb test database
+    - name: Removing the Mariadb test database
       mysql_db:
         name: 'test'
         state: absent
@@ -142,6 +145,7 @@
         update_cache: yes
       with_items:
         - curl
+        - git
         - wget
         - php7.0
         - php7.0-fpm
@@ -153,6 +157,40 @@
         - php7.0-zip
         - php7.0-gmp
         - php7.0-xml
+      become: true
+      
+    - name: Restarting php-fpm
+      lineinfile:
+        path: '/etc/php/7.0/fpm/php.ini'
+        regexp: 
+        line: 
+      become: true
+      notify: 
+        - restart php-fpm
+
+    - name: Checking if composer is installed
+      stat: 
+        path: '{{composer_path}}'
+      register: composer_installed
+
+    - name: Downloading the composer installer 
+      get_url:
+        url: 'https://getcomposer.org/installer'
+        dest: '/tmp/composer-installer.php'
+        mode: 0755
+      when: not composer_installed.stat.exists
+
+    - name: Running composer installer
+      command: "'{{php_executable}}' composer-installer.php" 
+      args:
+        chdir: /tmp
+      when: not composer_installed.stat.exists
+
+    - name: Moving composer into our path
+      command: "mv /tmp/composer.phar '{{composer_path}}' "
+      args:
+        creates: '{{composer_path}}'
+      when: not composer_installed.stat.exists
       become: true
 
 
@@ -173,3 +211,8 @@
         name: mariadb
         state: restarted
         sleep: 5
+
+    - name: restart php-fpm
+      service:
+        name: php7.0-fpm
+        state: restarted
