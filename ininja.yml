@@ -2,10 +2,14 @@
 
 - name: Deploy Invoice Ninja
   hosts: ininja
+
+  
   vars:
-    user: '{{ ansible_ssh_user }}'
+    user: '{{ ansible_user_id }}'
+    app_user: ininja_user
     app_name: ininja
-    webdir: /var/www/html
+    app_user_password: "p5#rJF1LRPxFmyDSYEoxtez7"
+    webdir: /var/www
     hostname: '{{ ansible_hostname }}'
     nginx_deb_repo_enabled: true
     nginx_deb_repo_key_url: 'https://nginx.org/keys/nginx_signing.key'
@@ -15,6 +19,13 @@
     mariadb_root_pwd: 'romo13.23'
     php_executable: 'php'
     composer_path: '/usr/local/bin/composer'
+    ssl_cert_country: "MX"
+    ssl_cert_locality: "Guadalajara"
+    ssl_cert_state: "Jalisco"
+    ssl_cert_common_name: "ansible_fqdn"
+    ssl_cert_days: "365"
+    ssl_cert_organization: "Company"
+    ssl_cert_fields: "/C={{ssl_cert_country}}/ST={{ssl_cert_state}}/L={{ssl_cert_locality}}/O={{ssl_cert_organization}}/CN={{ssl_cert_common_name}}"
   
 
   tasks:
@@ -145,7 +156,6 @@
         update_cache: yes
       with_items:
         - curl
-        - git
         - wget
         - php7.0
         - php7.0-fpm
@@ -159,13 +169,16 @@
         - php7.0-xml
       become: true
       
-    - name: Restarting php-fpm
+    - name: Setting cgi.fix_pathinfo=0
       lineinfile:
-        path: '/etc/php/7.0/fpm/php.ini'
-        regexp: 
-        line: 
+        # use path instead of dest if ansible >= 2.3
+        dest: '/etc/php/7.0/fpm/php.ini'
+        regexp: '^;cgi.fix_pathinfo=1$'
+        state: present
+        line: 'cgi.fix_pathinfo=0'
+        backrefs: yes
       become: true
-      notify: 
+      notify:
         - restart php-fpm
 
     - name: Checking if composer is installed
@@ -193,6 +206,92 @@
       when: not composer_installed.stat.exists
       become: true
 
+    # Invoice Ninja
+    - name: Installing git 
+      apt:
+        name: git
+        state: installed
+      become: True
+
+    
+    - name: Setting Invoice Ninja root folder permissions
+      file: 
+        dest: /var/www/{{app_name}}
+        state: directory
+        recurse: yes
+        owner: "{{user}}"
+        group: www-data
+        mode: 0750
+      become: true
+
+    - name: Cloning Invoice Ninja git repo
+      git:
+        repo: https://github.com/invoiceninja/invoiceninja.git
+        clone: yes
+        dest: /var/www/{{app_name}}
+        update: no
+      
+
+    - name: Downloading Invoice Ninja dependencies via composer
+      composer:
+        command: install 
+        no_dev: no
+        optimize_autoloader: yes
+        working_dir: /var/www/{{app_name}}
+
+    - name: Creating db for Invoice Ninja
+      mysql_db:
+        name: "{{app_name}}"
+        state: present
+      become: yes
+
+    - name: Creating user for Invoice Ninja db
+      mysql_user:
+        name: "{{ app_user}}"
+        password: "{{app_user_password}}"
+        priv: '{{app_name}}.*:ALL'
+        state: present
+      become: yes
+      register: db_user_passwd
+    
+    - name: Setting Invoice Ninja .env config
+      template:
+        src: env.j2
+        dest: "{{ webdir }}/{{app_name}}/.env"
+        owner: "{{user}}"
+        group: www-data
+        mode: 0750
+      become: true
+      register: env
+
+    - name: Running Invoice Ninja initial db migration
+      shell: php artisan migrate --force
+      args:
+        chdir: "{{webdir}}/{{ansible_hostname}}"
+      when: env.changed
+      tags:
+        - deployment
+      
+
+    - name: Seeding Invoice Ninja db
+      shell: php artisan db:seed
+      args:
+        chdir: "{{webdir}}/{{ansible_hostname}}"
+      when: env.changed
+      tags:
+        - deployment
+
+    - name: Creating a new php-fpm pool for user
+      template:
+        src: fpm-pool.conf.j2
+        dest: /etc/php/7.0/fpm/pool.d/{{ansible_fqdn}}.conf
+        owner: "{{user}}"
+        group: "{{user}}"
+        mode: 0660
+      become: true
+      notify:
+        - restart php-fpm
+
 
 # Handlers
   handlers:
@@ -200,19 +299,23 @@
       service: 
         name: nginx
         state: restarted
+      become: true
 
     - name: reload nginx
       service: 
         name: nginx
         state: reloaded
-    
+      become: true
+
     - name: restart mariadb
       service:
         name: mariadb
         state: restarted
         sleep: 5
+      become: true
 
     - name: restart php-fpm
       service:
         name: php7.0-fpm
         state: restarted
+      become: true
